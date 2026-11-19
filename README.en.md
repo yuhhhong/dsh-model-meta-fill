@@ -65,7 +65,7 @@ Method 2. Install directly from GitHub:
 dsh plugin --profile web add github:yuhhhong/dsh-model-meta-fill
 ```
 
-Method 3. On DSH's Plugins page, click Add Plugin and enter the repository URL: <https://github.com/yuhhhong/dsh-model-meta-fill>
+Method 3. On DSH's Plugins page, click Add Plugin and enter the npm package name: `dsh-model-meta-fill`
 
 After installation, restart DSH and refresh the page, then open **Settings → Models**. Provider cards with an explicit model list show **Fill missing** and **Overwrite**, and the bottom of the page displays the **Model metadata fill** status bar and **Manage relations** button.
 

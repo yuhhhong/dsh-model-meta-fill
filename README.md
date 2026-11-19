@@ -65,7 +65,7 @@ dsh plugin --profile web add dsh-model-meta-fill
 dsh plugin --profile web add github:yuhhhong/dsh-model-meta-fill
 ```
 
-方式 3：在 DSH 的插件页中，点击添加插件，填入项目仓库地址：<https://github.com/yuhhhong/dsh-model-meta-fill>
+方式 3：在 DSH 的插件页中，点击添加插件，填入 npm 包名：`dsh-model-meta-fill`
 
 安装后重启 DSH 并刷新页面，打开「设置 → 模型」。已显式配置模型列表的供应商卡片上会出现「自动填入」和「覆盖填入」按钮，页面底部会显示「模型元数据填入」状态栏与「关系管理」入口。
 
