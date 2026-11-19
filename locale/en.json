@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Model metadata fill",
+    "description": "Fetch model and service metadata from models.dev. Match local models, manage model and source mappings separately, then preview missing-field or overwrite updates from provider cards. Supports explicit llm-pi-ai model lists, context windows, maximum output tokens, text/image input, and explicit reasoning efforts; does not infer toggle or token-budget levels."
+  }
+}

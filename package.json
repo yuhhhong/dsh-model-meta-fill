@@ -1,0 +1,32 @@
+{
+  "name": "dsh-model-meta-fill",
+  "version": "0.1.0",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuhhhong/dsh-model-meta-fill.git"
+  },
+  "type": "module",
+  "description": "根据 models.dev 匹配模型资料、管理来源关系并预览填入上下文窗口、最大输出 token 数、输入类型与思考等级。",
+  "engines": { "dsh": ">=0.2.2-rc.2 <0.3.0" },
+  "exports": {
+    ".": "./src/index.js",
+    "./client": "./src/client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": ["src", "locale/*.json", "cordis.patch.yml", "icon.svg", "README.md", "README.en.md"],
+  "dependencies": {
+    "@deepseek-ai/schemastery": "3.19.0",
+    "zod": "4.6.6"
+  },
+  "scripts": { "test": "node --test test/*.test.js", "check": "node --check src/index.js && node --check src/application.js && node --check src/core.js && node --check src/client.js" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-settings-models", "@deepseek-ai/dsh-client-locale"]
+    }
+  }
+}

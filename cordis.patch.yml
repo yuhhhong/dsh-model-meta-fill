@@ -1,0 +1,4 @@
+- insert:
+    - id: model-meta-fill
+      name: dsh-model-meta-fill
+      config: {}
