@@ -20,7 +20,7 @@ function findElement(tree, predicate) {
   return null;
 }
 
-test('Client 插槽、精简预览、失效后的重新打开与关系切换', async () => {
+test('Client 插槽、精简预览、失效后的重新打开与关系切换', async t => {
   let plugin;
   let settingsRevision = 1;
   let writes = 0;
@@ -29,7 +29,7 @@ test('Client 插槽、精简预览、失效后的重新打开与关系切换', a
   let failRelationRead = false;
   const effects = [];
   const slots = new Map();
-  const app = createApplication({
+  const adapters = {
     cache: {
       version: 'v1', updatedAt: new Date().toISOString(),
       models: {
@@ -40,7 +40,7 @@ test('Client 插槽、精简预览、失效后的重新打开与关系切换', a
       api: {
         openai: { models: { 'gpt-test': { canonical_model_id: 'openai/gpt-test', reasoning: false } } },
         relay: { models: { manual: { canonical_model_id: 'lab/manual', limit: { output: 900 },
-          reasoning: true, reasoning_options: [{ type: 'toggle' }, { type: 'effort', values: ['low', 'high', 'max'] }, { type: 'budget_tokens', min: 1024 }] } } },
+          reasoning: true, reasoning_options: [{ type: 'toggle' }, { type: 'effort', values: ['none', 'low', 'high', 'max'] }, { type: 'budget_tokens', min: 1024 }] } } },
       },
     },
     readRelations: () => structuredClone(relations),
@@ -48,10 +48,13 @@ test('Client 插槽、精简预览、失效后的重新打开与关系切换', a
       relations = value;
       relationWrites += 1;
     },
-    describeModels: () => ({ ns: 'llm-pi-ai', revision: settingsRevision, value: { providers: { relay: { models: [{ id: 'gpt-test' }, { id: 'unknown-model' }] } } } }),
+    describeModels: () => ({ ns: 'llm-pi-ai', revision: settingsRevision, value: { providers: {
+      relay: { models: [{ id: 'gpt-test' }, { id: 'unknown-model' }] }, mirror: { models: [{ id: 'unknown-model' }, { id: 'Unknown-Model' }] },
+    } } }),
     mutateModels: () => { writes += 1; },
     conflicts: () => [],
-  });
+  };
+  let app = createApplication(adapters);
   const React = {
     Fragment: Symbol('Fragment'),
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
@@ -201,7 +204,7 @@ test('Client 插槽、精简预览、失效后的重新打开与关系切换', a
   service.props.onSelect(service.props.options[0].id);
   const metadata = findElement(editorTree(), item => item.type?.name === 'Metadata');
   const reasoning = findElement(metadata.type(metadata.props), item => item.type === 'pre');
-  assert.equal(reasoning.children[0], '支持开关\n思考等级: low, high, max\nToken 预算: 最少 1024');
+  assert.equal(reasoning.children[0], '支持开关\n思考等级: none, low, high, max\nToken 预算: 最少 1024');
   await action(editorTree(), '保存来源映射').props.onClick();
   assert.equal(managerState().dialog.tab, 'source');
   assert.deepEqual(relations.sources['lab/manual'], { provider: 'relay', modelId: 'manual' });
@@ -253,6 +256,177 @@ test('Client 插槽、精简预览、失效后的重新打开与关系切换', a
   assert.equal(Object.hasOwn(relations.sources, 'lab/no-service'), false);
   assert.deepEqual(relations.sources['lab/manual'], { provider: 'relay', modelId: 'manual' });
   assert.equal(writes, 0);
+  await t.test('自定义参数复制人工映射、精确匹配、保存后重新预览及无目录手填', async () => {
+    function customTree() {
+      const custom = findElement(managerTree(), item => item.type?.name === 'CustomEditor');
+      return custom.type(custom.props);
+    }
+    function field(name) {
+      const item = findElement(customTree(), node => ['input', 'select'].includes(node.type) && node.props.name === name);
+      assert.ok(item, name);
+      return item;
+    }
+    function change(name, target) {
+      field(name).props.onChange({ target });
+    }
+    function slideSwitch() {
+      const control = findElement(customTree(), node => node.props.role === 'switch');
+      assert.ok(control);
+      return control;
+    }
+    function namedButton(label) {
+      const control = findElement(customTree(), node => node.type === 'button' && node.props['aria-label'] === label);
+      assert.ok(control, label);
+      return control;
+    }
+    function pressTab(label, key, next) {
+      const tab = action(managerTree(), label);
+      let focused = '';
+      let prevented = false;
+      tab.props.onKeyDown({ key, preventDefault() { prevented = true; }, currentTarget: { parentElement: {
+        querySelector(selector) { return { focus() { focused = selector; } }; },
+      } } });
+      assert.equal(prevented, true);
+      assert.equal(focused, `[data-kind="${next}"]`);
+      assert.equal(managerState().dialog.tab, next);
+    }
+
+    relations.bodies[modelKey] = 'lab/manual';
+    await action(renderDialog(), '返回填入预览').props.onClick();
+    await manageModel('unknown-model');
+    action(editorTree(), '返回关系列表').props.onClick();
+    pressTab('模型映射', 'ArrowLeft', 'custom');
+    pressTab('自定义参数', 'ArrowRight', 'body');
+    pressTab('模型映射', 'End', 'custom');
+    pressTab('自定义参数', 'Home', 'body');
+    pressTab('模型映射', 'ArrowRight', 'source');
+    pressTab('来源映射', 'ArrowRight', 'custom');
+    action(managerTree(), '新增自定义参数').props.onClick();
+    const picker = findElement(customTree(), item => item.type?.name === 'SearchCombo');
+    await picker.props.onSelect(modelKey);
+    assert.equal(field('id').props.value, 'unknown-model');
+    assert.equal(field('contextWindow').props.value, '');
+    assert.equal(field('maxTokens').props.value, '900');
+    assert.equal(slideSwitch().props['aria-checked'], true);
+    assert.equal(field('off').props.value, 'none');
+    assert.ok(!findElement(field('effortLevel-0'), node => node.type === 'option' && node.props.value === 'high'));
+    change('effortLevel-0', { value: 'minimal' });
+    assert.equal(field('minimal').props.value, 'minimal');
+    change('effortLevel-0', { value: 'off' });
+    assert.equal(field('off').props.value, 'none');
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, true);
+    change('contextWindow', { value: '9007199254740992' });
+    change('image', { checked: true });
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, true);
+    change('contextWindow', { value: '12345' });
+    change('high', { value: 'high-v2' });
+    relations.custom.concurrent = { contextWindow: 2048, maxTokens: 512, input: ['text'], reasoningEfforts: false };
+    await action(customTree(), '保存自定义参数').props.onClick();
+    assert.equal(Object.hasOwn(relations.custom, 'unknown-model'), false);
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, true);
+    delete relations.custom.concurrent;
+    await action(customTree(), '重新加载关系').props.onClick();
+    assert.equal(field('contextWindow').props.value, '12345');
+    assert.equal(field('high').props.value, 'high-v2');
+    await action(customTree(), '保存自定义参数').props.onClick();
+    assert.deepEqual(relations.custom['unknown-model'], { contextWindow: 12345, maxTokens: 900, input: ['image'], reasoningEfforts: { low: 'low', high: 'high-v2', max: 'max', off: 'none' } });
+    assert.equal(writes, 0);
+    assert.equal(managerState().dialog.stale, true);
+    assert.ok(findElement(Footer(), node => node.children?.[0]?.includes?.('自定义参数: 1')));
+
+    action(managerTree(), '新增自定义参数').props.onClick();
+    change('id', { value: 'unknown-model' });
+    change('contextWindow', { value: '123' });
+    change('maxTokens', { value: '456' });
+    change('text', { checked: true });
+    assert.equal(slideSwitch().props['aria-checked'], false);
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, true);
+    slideSwitch().props.onClick();
+    assert.equal(slideSwitch().props['aria-checked'], true);
+    assert.deepEqual(['off', 'low', 'medium', 'high'].map(level => field(level).props.value), ['', 'low', 'medium', 'high']);
+    for (const [index, level] of ['xhigh', 'max', 'minimal'].entries()) {
+      namedButton('添加档位').props.onClick();
+      assert.equal(field(`effortLevel-${index + 4}`).props.value, level);
+      assert.equal(field(level).props.value, level);
+    }
+    assert.equal(namedButton('添加档位').props.disabled, true);
+    slideSwitch().props.onClick();
+    assert.equal(field('id').props['aria-invalid'], true);
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, true);
+    change('id', { value: 'Unknown-Model' });
+    assert.equal(field('id').props['aria-invalid'], undefined);
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, false);
+    action(customTree(), '返回关系列表').props.onClick();
+
+    await action(renderDialog(), '返回填入预览').props.onClick();
+    assert.equal(dialogElement().props.data.dialog.preview.rows[1].source.status, 'custom');
+    const preview = renderPreview(renderDialog());
+    const row = findElement(preview, item => item.type === 'section' && item.props.key === 'unknown-model');
+    assert.ok(findElement(row, item => item.children[0] === '资料来源: 自定义参数'));
+    assert.equal(findElement(row, item => item.children[0] === '未知'), null);
+    await manageModel('unknown-model');
+    assert.equal(managerState().dialog.editor.kind, 'custom');
+    assert.equal(field('high').props.value, 'high-v2');
+    slideSwitch().props.onClick();
+    assert.equal(slideSwitch().props['aria-checked'], false);
+    slideSwitch().props.onClick();
+    assert.equal(field('high').props.value, 'high-v2');
+    change('off', { value: '' });
+    namedButton('添加档位').props.onClick();
+    assert.equal(field('minimal').props.value, 'minimal');
+    change('effortLevel-4', { value: 'medium' });
+    assert.equal(field('medium').props.value, 'medium');
+    change('medium', { value: '' });
+    assert.equal(field('medium').props['aria-invalid'], true);
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, true);
+    namedButton('删除档位 medium').props.onClick();
+    await action(customTree(), '保存自定义参数').props.onClick();
+    assert.equal(relations.custom['unknown-model'].reasoningEfforts.off, null);
+    action(renderDialog(), '关闭').props.onClick();
+
+    await app.dispose();
+    app = createApplication({ ...adapters, cache: null });
+    function providerCard(id) {
+      return ProviderCard({ provider: { provider: id }, configured: true });
+    }
+    providerCard('mirror');
+    effects.at(-1)();
+    await new Promise(resolve => setImmediate(resolve));
+    const fillMirror = action(providerCard('mirror'), '自动填入');
+    assert.equal(fillMirror.props.disabled, false);
+    await fillMirror.props.onClick();
+    const rows = dialogElement().props.data.dialog.preview.rows;
+    assert.equal(rows[0].source.status, 'custom');
+    assert.equal(rows[1].changes.length, 0);
+    await manageModel('unknown-model');
+    action(customTree(), '返回关系列表').props.onClick();
+    const existing = findElement(managerTree(), item => item.type === 'li' && item.props.key === 'unknown-model');
+    assert.ok(existing);
+    action(managerTree(), '新增自定义参数').props.onClick();
+    const emptyTemplate = findElement(customTree(), item => item.type?.name === 'SearchCombo');
+    assert.equal(emptyTemplate.props.disabled, false);
+    assert.ok(emptyTemplate.props.options.filter(option => option.disabled).length === 2);
+    change('contextWindow', { value: '123' });
+    await emptyTemplate.props.onSelect('["mirror","Unknown-Model"]');
+    assert.equal(field('id').props.value, 'Unknown-Model');
+    assert.equal(field('contextWindow').props.value, '123');
+    assert.equal(field('maxTokens').props.value, '');
+    assert.ok(findElement(customTree(), item => item.props.role === 'status' && item.children[0].includes('没有可用的映射参数')));
+    change('id', { value: 'not-listed' });
+    change('contextWindow', { value: '123' });
+    change('maxTokens', { value: '456' });
+    change('text', { checked: true });
+    assert.equal(slideSwitch().props['aria-checked'], false);
+    assert.equal(action(customTree(), '保存自定义参数').props.disabled, false);
+    await action(customTree(), '保存自定义参数').props.onClick();
+    assert.deepEqual(relations.custom['not-listed'], { contextWindow: 123, maxTokens: 456, input: ['text'], reasoningEfforts: false });
+    const saved = findElement(managerTree(), item => item.type === 'li' && item.props.key === 'unknown-model');
+    action(saved, '编辑').props.onClick();
+    await action(customTree(), '移除自定义参数').props.onClick();
+    assert.equal(Object.hasOwn(relations.custom, 'unknown-model'), false);
+    assert.equal(action(providerCard('mirror'), '自动填入').props.disabled, true);
+    assert.equal(writes, 0);
+  });
   assert.deepEqual(Object.keys(dictionaries['model-meta-fill'].zh).sort(), Object.keys(dictionaries['model-meta-fill'].en).sort());
   for (const dispose of disposers.reverse()) {
     if (dispose) {

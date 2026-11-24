@@ -1,15 +1,24 @@
 import schema from '@deepseek-ai/schemastery';
 import { z } from 'zod';
-import { createApplication } from './application.js';
+import { createApplication, relationsValue } from './application.js';
+import { effortLevels } from './core.js';
 
 const sourceTarget = schema.object({ provider: schema.string().required(), modelId: schema.string().required() });
+const tokenCount = schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required();
+const effortMapping = schema.dict(schema.union([schema.string().min(1), schema.const(null)]), schema.union(effortLevels));
+const customParameters = schema.object({
+  contextWindow: tokenCount,
+  maxTokens: tokenCount,
+  input: schema.array(schema.union(['text', 'image']).required()).min(1).required(),
+  reasoningEfforts: schema.union([schema.const(false), effortMapping]).required(),
+}).required();
 export const Config = schema.object({
-  relations: schema.object({ bodies: schema.dict(schema.string()), sources: schema.dict(sourceTarget) }).default({ bodies: {}, sources: {} }).volatile(),
+  relations: schema.object({ bodies: schema.dict(schema.string()), sources: schema.dict(sourceTarget), custom: schema.dict(customParameters) }).default(relationsValue()).volatile(),
 });
 export const inject = ['settings', 'configEditor', 'storageDomain', 'webServer', 'connection'];
 
 const ACTION_PATH = '/plugins/model-meta-fill/action';
-const ACTIONS = ['status', 'refresh', 'catalog', 'relations', 'saveRelation', 'preview', 'apply'];
+const ACTIONS = ['status', 'refresh', 'catalog', 'relations', 'customTemplate', 'saveRelation', 'preview', 'apply'];
 
 function validateRequest(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) || !ACTIONS.includes(value.action)) {
@@ -68,9 +77,7 @@ export async function apply(ctx, config) {
         throw new Error('当前 profile 无法保存插件关系配置。');
       }
       await ctx.configEditor.edit(entry, current => {
-        const effective = getRelations();
-        const before = { bodies: { ...(effective?.bodies ?? {}) }, sources: { ...(effective?.sources ?? {}) } };
-        if (JSON.stringify(before) !== expectedRevision) {
+        if (JSON.stringify(relationsValue(getRelations())) !== expectedRevision) {
           throw Object.assign(new Error('关系已被其他操作修改，请刷新后重试。'), { code: 'STALE_RELATIONS' });
         }
         return { ...current, relations };

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { buildCatalog, localKey, matchModel, planModel, resolveSource, searchModels } from './core.js';
+import { buildCatalog, customTemplate, localKey, matchModel, planModel, resolveSource, searchModels, validCustomParameters } from './core.js';
 
 const CACHE_MAX_AGE = 7 * 24 * 60 * 60 * 1000;
 const PREVIEW_MAX_AGE = 30 * 60 * 1000;
@@ -20,8 +20,12 @@ function copy(value) {
   return structuredClone(value);
 }
 
-function relationsValue(value) {
-  return { bodies: { ...(value?.bodies ?? {}) }, sources: { ...(value?.sources ?? {}) } };
+export function relationsValue(value) {
+  return { bodies: { ...(value?.bodies ?? {}) }, sources: { ...(value?.sources ?? {}) }, custom: { ...(value?.custom ?? {}) } };
+}
+
+function acceptsEfforts(api, efforts) {
+  return api !== 'google-generative-ai' || efforts === false || Object.entries(efforts).every(([level, value]) => ['minimal', 'low', 'medium', 'high'].includes(level) && value === level);
 }
 
 // 本对象只暴露模型字段，绝不将供应商凭据或自定义请求头传给客户端。
@@ -71,17 +75,18 @@ export function createApplication(adapters) {
 
   function status() {
     const description = adapters.describeModels();
+    const current = relations();
     const providers = Object.entries(description?.value?.providers ?? {}).flatMap(([id, profile]) => {
       if (!Array.isArray(profile.models) || profile.models.length === 0) {
         return [];
       }
-      return [{ id, name: profile.displayName || id, count: profile.models.length }];
+      const hasCustom = profile.models.some(model => Object.hasOwn(current.custom, model.id));
+      return [{ id, name: profile.displayName || id, count: profile.models.length, hasCustom }];
     });
-    const current = relations();
     return {
       cache: { ready: catalog !== null, updatedAt: cache?.updatedAt ?? null, refreshing: refreshing !== null, error: refreshError, version: cache?.version ?? null },
       relationsRevision: revision(),
-      relationCounts: { bodies: Object.keys(current.bodies).length, sources: Object.keys(current.sources).length },
+      relationCounts: { bodies: Object.keys(current.bodies).length, sources: Object.keys(current.sources).length, custom: Object.keys(current.custom).length },
       providers,
       conflicts: adapters.conflicts(),
     };
@@ -156,21 +161,42 @@ export function createApplication(adapters) {
     return { relations: current, relationsRevision: revision(), locals, sourceStatuses };
   }
 
+  function getCustomTemplate(request) {
+    if (typeof request.provider !== 'string' || typeof request.id !== 'string') {
+      reject('INVALID_RELATION', '请选择一条本地模型作为模板。');
+    }
+    const profile = providerOf(descriptor(), request.provider);
+    const model = profile.models.find(model => model.id === request.id);
+    if (!model) {
+      reject('INVALID_RELATION', '用作模板的本地模型已不存在。');
+    }
+    const parameters = customTemplate(catalog, request.provider, model, relations());
+    if (parameters.reasoningEfforts !== undefined && !acceptsEfforts(profile.api, parameters.reasoningEfforts)) {
+      delete parameters.reasoningEfforts;
+    }
+    return { parameters };
+  }
+
   function saveRelation(request) {
     const operation = relationQueue.then(async () => {
-      if (request.target !== null) {
+      if (request.target !== null && request.kind !== 'custom') {
         ready();
       }
       if (request.expectedRevision !== revision()) {
         reject('STALE_RELATIONS', '关系已经被修改，请刷新关系管理后重试。');
       }
-      if (!['body', 'source'].includes(request.kind) || typeof request.key !== 'string' || !request.key) {
+      if (!['body', 'source', 'custom'].includes(request.kind) || typeof request.key !== 'string' || !request.key.trim()) {
         reject('INVALID_RELATION', '关系类型或标识无效。');
       }
       const current = relations();
-      const collection = request.kind === 'body' ? current.bodies : current.sources;
+      const collection = current[{ body: 'bodies', source: 'sources', custom: 'custom' }[request.kind]];
       if (request.target === null) {
         delete collection[request.key];
+      } else if (request.kind === 'custom') {
+        if (!validCustomParameters(request.target)) {
+          reject('INVALID_RELATION', '请填写有效的上下文窗口、最大输出 token 数、输入类型和思考等级。');
+        }
+        current.custom = { ...collection, [request.key]: copy(request.target) };
       } else if (request.kind === 'body') {
         let identity;
         try {
@@ -205,23 +231,23 @@ export function createApplication(adapters) {
   }
 
   function preview(request) {
-    ready();
     if (!MODES.has(request.mode) || typeof request.provider !== 'string') {
       reject('INVALID_PREVIEW', '请选择供应商以及自动填入或覆盖填入模式。');
     }
     const description = descriptor();
     const profile = providerOf(description, request.provider);
     const current = relations();
+    if (!profile.models.some(model => Object.hasOwn(current.custom, model.id))) {
+      ready();
+    }
     const rows = profile.models.map(model => {
       const row = planModel(catalog, request.provider, localModel(model), current, request.mode, request.choices ?? {});
-      // Gemini 只接受自己的四个等级及同名值，不能把 OpenAI 等级硬套到该协议。
-      if (profile.api === 'google-generative-ai') {
-        const change = row.changes.find(item => item.field === 'reasoningEfforts' && item.after !== false);
-        if (change && Object.entries(change.after).some(([level, value]) => !['minimal', 'low', 'medium', 'high'].includes(level) || value !== level)) {
-          row.changes = row.changes.filter(item => item !== change);
-          row.warnings.push('当前 Gemini 协议无法表达来源的全部思考等级，已跳过该字段。');
-          row.skipped = row.changes.length === 0;
-        }
+      // Gemini 只接受自己的四个等级及同名值。
+      const change = row.changes.find(item => item.field === 'reasoningEfforts');
+      if (change && !acceptsEfforts(profile.api, change.after)) {
+        row.changes = row.changes.filter(item => item !== change);
+        row.warnings.push('当前 Gemini 协议无法表达来源的全部思考等级，已跳过该字段。');
+        row.skipped = row.changes.length === 0;
       }
       return row;
     });
@@ -232,7 +258,7 @@ export function createApplication(adapters) {
     }
     const token = randomUUID();
     const fieldCount = rows.reduce((sum, row) => sum + row.changes.length, 0);
-    const value = { token, provider: request.provider, mode: request.mode, cacheVersion: cache.version, relationsRevision: revision(), rows, fieldCount };
+    const value = { token, provider: request.provider, mode: request.mode, cacheVersion: cache?.version ?? null, relationsRevision: revision(), rows, fieldCount };
     previews.set(token, { value: copy(value), ns: description.ns, settingsRevision: description.revision, expiresAt: now() + PREVIEW_MAX_AGE });
     return value;
   }
@@ -291,6 +317,7 @@ export function createApplication(adapters) {
         case 'refresh': return refresh();
         case 'catalog': return catalogView(request);
         case 'relations': return relationView();
+        case 'customTemplate': return getCustomTemplate(request);
         case 'saveRelation': return saveRelation(request);
         case 'preview': return preview(request);
         case 'apply': {

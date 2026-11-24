@@ -29,7 +29,7 @@ function fixture(overrides = {}) {
 test('状态和关系不泄露凭据或供应商完整配置', async () => {
   const { app } = fixture();
   const status = await app.execute({ action: 'status' });
-  assert.deepEqual(status.providers, [{ id: 'relay', name: '测试中转', count: 1 }]);
+  assert.deepEqual(status.providers, [{ id: 'relay', name: '测试中转', count: 1, hasCustom: false }]);
   const all = JSON.stringify([status, await app.execute({ action: 'relations' }), await app.execute({ action: 'preview', provider: 'relay', mode: 'missing' })]);
   assert.ok(!all.includes('SECRET_REF'));
   assert.ok(!all.includes('PRIVATE'));
@@ -147,6 +147,79 @@ test('Gemini 在预览阶段跳过不能表达的等级，合法关闭保持预�
   assert.equal(result.rows[0].changes.find(item => item.field === 'reasoningEfforts').after, false);
   await closed.app.execute({ action: 'apply', token: result.token });
   assert.equal(closed.writes[0].operations.find(item => item.path.at(-1) === 'reasoningEfforts').value, false);
+});
+
+const custom = { contextWindow: 64000, maxTokens: 8192, input: ['text'], reasoningEfforts: false };
+
+async function saveCustom(app, key, target) {
+  const { relationsRevision } = await app.execute({ action: 'relations' });
+  return app.execute({ action: 'saveRelation', kind: 'custom', key, target, expectedRevision: relationsRevision });
+}
+
+test('自定义模板读取当前人工映射，缺项留空，无匹配时可从空白填写', async () => {
+  const { app, setRelations } = fixture();
+  const request = { action: 'customTemplate', provider: 'relay', id: 'gpt-test' };
+  assert.deepEqual((await app.execute(request)).parameters, { contextWindow: 100000, maxTokens: 128000, input: ['text', 'image'], reasoningEfforts: { low: 'low', high: 'high' } });
+  const bodies = { '["relay","gpt-test"]': 'openai/gpt-test' };
+  setRelations({ bodies, sources: { 'openai/gpt-test': { provider: 'openai', modelId: 'gpt-test' } } });
+  assert.deepEqual((await app.execute(request)).parameters, { contextWindow: 80000, input: ['text'], reasoningEfforts: { low: 'low', high: 'high' } });
+  setRelations({ bodies: { '["relay","gpt-test"]': 'gone/model' } });
+  assert.deepEqual(await app.execute(request), { parameters: {} });
+});
+
+test('自定义参数按原始 ID 跨供应商共享，跳过失效映射并区分补缺与覆盖', async () => {
+  const describeModels = () => ({ ns: 'llm-pi-ai', revision: 1, value: { providers: {
+    relay: { models: [{ id: 'gpt-test', maxTokens: 4096 }, { id: 'GPT-TEST' }, { id: 'openai/gpt-test' }] },
+    mirror: { models: [{ id: 'gpt-test', name: '另外的显示名' }] },
+  } } });
+  const { app, setRelations, writes } = fixture({ describeModels });
+  setRelations({ bodies: { '["relay","gpt-test"]': 'gone/model' }, sources: { 'openai/gpt-test': { provider: 'gone', modelId: 'model' } } });
+  await saveCustom(app, 'gpt-test', custom);
+  const missing = await app.execute({ action: 'preview', provider: 'relay', mode: 'missing' });
+  assert.deepEqual(missing.rows[0].source, { status: 'custom' });
+  assert.equal(missing.rows[0].match, null);
+  assert.deepEqual(missing.rows[0].changes.map(change => change.field), ['contextWindow', 'input', 'reasoningEfforts']);
+  assert.ok(missing.rows.slice(1).every(row => row.source.status !== 'custom'));
+  const overwrite = await app.execute({ action: 'preview', provider: 'relay', mode: 'overwrite' });
+  assert.deepEqual(overwrite.rows[0].changes.find(change => change.field === 'maxTokens'), { field: 'maxTokens', before: 4096, after: 8192, origin: 'custom' });
+  const shared = await app.execute({ action: 'preview', provider: 'mirror', mode: 'missing' });
+  assert.deepEqual(Object.fromEntries(shared.rows[0].changes.map(change => [change.field, change.after])), custom);
+  assert.equal(writes.length, 0);
+  await app.execute({ action: 'apply', token: overwrite.token });
+  assert.equal(writes[0].operations.find(op => op.path.at(-1) === 'maxTokens').value, custom.maxTokens);
+  await saveCustom(app, 'gpt-test', null);
+  const restored = await app.execute({ action: 'preview', provider: 'mirror', mode: 'overwrite' });
+  assert.equal(restored.rows[0].source.status, 'invalid');
+  assert.equal(writes.length, 1);
+});
+
+test('没有目录也可新建、编辑和移除关系，关系变化使旧预览失效', async () => {
+  const { app, writes } = fixture({ cache: null });
+  assert.deepEqual(await app.execute({ action: 'customTemplate', provider: 'relay', id: 'gpt-test' }), { parameters: {} });
+  await saveCustom(app, 'gpt-test', custom);
+  const status = await app.execute({ action: 'status' });
+  assert.equal(status.providers[0].hasCustom, true);
+  assert.equal(status.relationCounts.custom, 1);
+  const plan = await app.execute({ action: 'preview', provider: 'relay', mode: 'missing' });
+  assert.equal(plan.fieldCount, 4);
+  assert.equal(plan.cacheVersion, null);
+  const edited = { ...custom, reasoningEfforts: { off: null, high: 'high' } };
+  await saveCustom(app, 'gpt-test', edited);
+  await assert.rejects(app.execute({ action: 'apply', token: plan.token }), { code: 'STALE_PREVIEW' });
+  const next = await app.execute({ action: 'preview', provider: 'relay', mode: 'overwrite' });
+  assert.deepEqual(next.rows[0].changes.find(change => change.field === 'reasoningEfforts').after, edited.reasoningEfforts);
+  await saveCustom(app, 'gpt-test', null);
+  assert.deepEqual((await app.execute({ action: 'relations' })).relations.custom, {});
+  assert.equal(writes.length, 0);
+});
+
+test('自定义关系仅接受四项完整且有效的模型元数据', async () => {
+  const { app } = fixture();
+  for (const values of [{ ...custom, maxTokens: undefined }, { ...custom, contextWindow: 1.5 }, { ...custom, input: [] }, { ...custom, reasoningEfforts: { off: null } }, { ...custom, reasoningEfforts: { high: null } }, { ...custom, temperature: 1 }]) {
+    await assert.rejects(saveCustom(app, 'gpt-test', values), { code: 'INVALID_RELATION' });
+  }
+  await saveCustom(app, 'not-in-catalog', custom);
+  assert.deepEqual((await app.execute({ action: 'relations' })).relations.custom['not-in-catalog'], custom);
 });
 
 test('拒绝任意服务身份和不存在的本地模型关系', async () => {

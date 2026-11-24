@@ -1,5 +1,6 @@
 // 纯目录与差异计算，不访问网络、配置或宿主运行时。
-const effortLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const effortLevels = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const metadataFields = ['contextWindow', 'maxTokens', 'input', 'reasoningEfforts'];
 const matchRanks = { exact: 0, prefix: 1, none: 2 };
 const owns = (value, key) => Object.hasOwn(value ?? {}, key);
 const recordOf = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -251,9 +252,15 @@ function sameValue(left, right) {
   return false;
 }
 
-export function planModel(catalog, provider, model, relations = {}, mode, choices = {}) {
-  if (mode !== 'missing' && mode !== 'overwrite') {
-    throw new TypeError('填入模式必须为 missing 或 overwrite。');
+export function validCustomParameters(value) {
+  return recordOf(value) && Object.keys(value).length === metadataFields.length && metadataFields.every(field => localFieldState(value, field) === 'existing');
+}
+
+function mappedMetadata(catalog, provider, model, relations, choices) {
+  const resolution = { match: null, source: { status: 'missing' }, warnings: [], parameters: {} };
+  if (!catalog) {
+    resolution.warnings.push('尚无可用资料，请先刷新模型资料。');
+    return resolution;
   }
   const key = localKey(provider, model.id);
   let match = matchModel(catalog, provider, model, relations);
@@ -263,40 +270,60 @@ export function planModel(catalog, provider, model, relations = {}, mode, choice
       ? { status: 'matched', canonicalId, candidates: [canonicalId], rule: 'choice' }
       : { status: 'invalid', candidates: [], rule: 'choice', message: '本次选择的模型本体已失效。' };
   }
-  const result = { id: model.id, name: model.name ?? model.id, match, source: { status: 'missing' }, changes: [], warnings: [], skipped: true };
+  resolution.match = match;
   if (match.status !== 'matched') {
-    result.warnings.push(match.message);
-    return result;
+    resolution.warnings.push(match.message);
+    return resolution;
   }
-  const canonicalId = match.canonicalId;
-  result.canonicalId = canonicalId;
+  const { canonicalId } = match;
+  resolution.canonicalId = canonicalId;
   const source = resolveSource(catalog, canonicalId, relations);
-  result.source = source;
+  resolution.source = source;
   if (source.status === 'invalid') {
-    result.warnings.push(source.message);
-    return result;
+    resolution.warnings.push(source.message);
+    return resolution;
   }
   if (source.status === 'missing') {
-    result.warnings.push(source.message);
+    resolution.warnings.push(source.message);
   }
   const service = catalog.services[source.serviceKey];
   const base = source.status === 'manual' ? service : catalog.models[canonicalId];
-  const baseOrigin = source.status === 'manual' ? `api.json:${source.serviceKey}` : `models.json:${canonicalId}`;
+  resolution.baseOrigin = source.status === 'manual' ? `api.json:${source.serviceKey}` : `models.json:${canonicalId}`;
   const contextWindow = base?.limit?.context;
   const maxTokens = base?.limit?.output;
-  const proposed = {
+  resolution.parameters = {
     contextWindow: Number.isSafeInteger(contextWindow) && contextWindow > 0 ? contextWindow : undefined,
     maxTokens: Number.isSafeInteger(maxTokens) && maxTokens > 0 ? maxTokens : undefined,
-    input: sourceInput(base, result.warnings),
-    reasoningEfforts: sourceEfforts(service, result.warnings),
+    input: sourceInput(base, resolution.warnings),
+    reasoningEfforts: sourceEfforts(service, resolution.warnings),
   };
-  if (proposed.contextWindow === undefined) {
-    result.warnings.push('所选基础来源没有有效上下文窗口，保留本地值。');
+  if (resolution.parameters.contextWindow === undefined) {
+    resolution.warnings.push('所选基础来源没有有效上下文窗口，保留本地值。');
   }
-  if (proposed.maxTokens === undefined) {
-    result.warnings.push('所选来源未提供有效的最大输出 token 数，本次不填入该字段。');
+  if (resolution.parameters.maxTokens === undefined) {
+    resolution.warnings.push('所选来源未提供有效的最大输出 token 数，本次不填入该字段。');
   }
-  for (const field of ['contextWindow', 'maxTokens', 'input', 'reasoningEfforts']) {
+  return resolution;
+}
+
+export function customTemplate(catalog, provider, model, relations) {
+  const { parameters } = mappedMetadata(catalog, provider, model, relations, {});
+  return Object.fromEntries(Object.entries(parameters).filter(([, value]) => value !== undefined));
+}
+
+export function planModel(catalog, provider, model, relations = {}, mode, choices = {}) {
+  if (mode !== 'missing' && mode !== 'overwrite') {
+    throw new TypeError('填入模式必须为 missing 或 overwrite。');
+  }
+  const custom = owns(relations.custom, model.id);
+  const { parameters, baseOrigin, ...resolution } = custom
+    ? { match: null, source: { status: 'custom' }, warnings: [], parameters: relations.custom[model.id], baseOrigin: 'custom' }
+    : mappedMetadata(catalog, provider, model, relations, choices);
+  const result = { id: model.id, name: model.name ?? model.id, ...resolution, changes: [], skipped: true };
+  if (Object.keys(parameters).length === 0) {
+    return result;
+  }
+  for (const field of metadataFields) {
     const state = localFieldState(model, field);
     if (state === 'invalid') {
       const fieldLabel = field === 'maxTokens' ? '最大输出 token 数' : field;
@@ -305,7 +332,7 @@ export function planModel(catalog, provider, model, relations = {}, mode, choice
         continue;
       }
     }
-    const after = proposed[field];
+    const after = parameters[field];
     if (after === undefined || (mode === 'missing' && state === 'existing')) {
       continue;
     }
@@ -313,7 +340,8 @@ export function planModel(catalog, provider, model, relations = {}, mode, choice
     if (sameValue(before, after)) {
       continue;
     }
-    result.changes.push({ field, before, after, origin: field === 'reasoningEfforts' ? `api.json:${source.serviceKey}` : baseOrigin });
+    const origin = field === 'reasoningEfforts' && !custom ? `api.json:${result.source.serviceKey}` : baseOrigin;
+    result.changes.push({ field, before, after, origin });
   }
   result.skipped = result.changes.length === 0;
   return result;

@@ -29,7 +29,13 @@ When automatic matching or default inference does not fit, **Manage relations** 
 - **Model mappings**: local provider + original model ID → canonical model ID
 - **Source mappings**: canonical model ID → provider ID + service model ID (shared by every local model that resolves to the same canonical model)
 
-Both mapping types are saved and removed independently, and saving a relation never modifies DSH model settings. Catalog refreshes never overwrite saved mappings. If a mapped target disappears or loses its link in a newer catalog, the plugin keeps the record, marks it invalid, and skips filling that model instead of silently switching to another source.
+Both mapping types are saved and removed independently. Catalog refreshes retain saved mappings. When a target disappears or loses its link, the plugin marks the relation as invalid. That model needs a corrected relation or custom parameters before it can be filled.
+
+### Key design decisions
+
+**Custom parameters take priority.** They match the original model ID exactly, including case and path prefixes. Providers with the same ID share one saved set. A match uses all four fields from that set and bypasses canonical model and service source mappings. This also works for models outside the catalog.
+
+When adding a set, select a local model to copy its current mapping results, including saved model and source mappings. You can also enter the original model ID and fill in the form manually. Missing context window, maximum output tokens, and input types start blank. The reasoning switch defaults to off when the template has no reasoning levels. The saved values stay fixed when the catalog or mappings change.
 
 ### Separate fill-missing and overwrite modes, with locked diff previews
 
@@ -75,13 +81,13 @@ To uninstall:
 dsh plugin --profile web remove dsh-model-meta-fill
 ```
 
-The current plugin version is `0.1.0`. The supported DSH range is `>=0.2.2-rc.2 <0.3.0`.
+The current plugin version is `0.2.0`. The supported DSH range is `>=0.2.2-rc.2 <0.3.0`.
 
 ## Usage
 
 ### Catalog cache and refresh
 
-The **Model metadata fill** section at the bottom of **Settings → Models** shows cache readiness, last update time, and counts of saved model and source mappings. Click **Refresh catalog** to pull updates from `models.dev` at any time. If no cache exists yet, refresh once before filling; if a later refresh fails, the footer reports the error and keeps the existing complete cache usable.
+The **Model metadata fill** section at the bottom of **Settings → Models** shows cache readiness, last update time, and counts of saved relations. Click **Refresh catalog** to pull updates from `models.dev`. A failed refresh keeps any existing cache. Models with saved custom parameters can be filled even before a catalog is available.
 
 ### Previewing and confirming updates
 
@@ -93,12 +99,13 @@ Click **Fill missing** or **Overwrite** on any provider card with an explicit mo
 
 ### Managing relations
 
-Click **Manage relations** in the footer to open the **Model mappings** and **Source mappings** tabs. Only saved manual mappings appear here; automatic matches and inferred sources are not listed.
+Click **Manage relations** in the footer to view saved entries in **Model mappings**, **Source mappings**, and **Custom parameters**.
 
 - Local model, canonical model, and service record fields each use a single searchable dropdown input.
 - From any saved row in **Model mappings**, click **Add source mapping** or **Edit source mapping** to configure the service record for that canonical model directly.
 - After saving a model mapping opened from a preview, if no usable automatic source exists and linked candidates are available, the dialog lets you pick a service source next, or click **Not now** to keep only the model mapping.
-- Saving or removing a relation only updates plugin configuration and never writes DSH model settings. Clicking **Back to preview** after editing relations recalculates the diff, and still requires **Confirm fill** before writing.
+- In **Custom parameters**, add, edit, or remove a complete set. Saving and removing a set only updates the relation. After removal, future fills use mappings again. Use **Overwrite** to update values that were already written.
+- Clicking **Back to preview** after editing relations recalculates the diff. Click **Confirm fill** to write the model settings.
 
 ## Scope and limitations
 

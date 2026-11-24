@@ -133,6 +133,17 @@ test('Host 注册、鉴权、中文流分片和继承关系并发校验', async 
   result = await request(handler, { action: 'saveRelation', kind: 'body', key: '["本地","模型"]', target: 'openai/gpt-test', expectedRevision: relationsRevision });
   assert.equal(result.status, 200);
   assert.deepEqual(saved.relations.bodies, relations.bodies);
+  result = await request(handler, { action: 'customTemplate', provider: '本地', id: '模型' });
+  assert.deepEqual(result.body.value.parameters, { contextWindow: 100000, input: ['text'], reasoningEfforts: false });
+  const custom = { contextWindow: 100000, maxTokens: 8192, input: ['text'], reasoningEfforts: { high: 'high', off: null } };
+  const { relationsRevision: currentRevision } = (await request(handler, { action: 'relations' })).body.value;
+  result = await request(handler, { action: 'saveRelation', kind: 'custom', key: '模型', target: custom, expectedRevision: currentRevision });
+  assert.equal(result.status, 200);
+  const reloaded = Config({ relations: saved.relations }).relations.get();
+  assert.deepEqual(reloaded.custom['模型'], custom);
+  assert.deepEqual(reloaded.bodies, relations.bodies);
+  result = await request(handler, { action: 'saveRelation', kind: 'custom', key: '模型', target: null, expectedRevision: currentRevision });
+  assert.equal(result.body.error.code, 'STALE_RELATIONS');
   rejected = true;
   result = await request(handler, { action: 'status' });
   assert.equal(result.status, 403);
